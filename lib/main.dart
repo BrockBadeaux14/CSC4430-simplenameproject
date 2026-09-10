@@ -1,34 +1,24 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:math' as math;
 
-void main() {
-  runApp(const MyApp());
-}
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+
+import 'gravity_simulation.dart';
+
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Flutter Demo',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
       home: const MyHomePage(title: 'Flutter Demo Home Page'),
     );
@@ -38,91 +28,243 @@ class MyApp extends StatelessWidget {
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
   final String title;
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
+class _MyHomePageState extends State<MyHomePage>
+    with SingleTickerProviderStateMixin {
+  static const _message = 'Brock has pushed the button this many times:';
+  static const _messageStyle = TextStyle(
+    fontSize: 32,
+    fontWeight: FontWeight.bold,
+  );
+  static const _motionChannel = EventChannel('simplenameproject/window_motion');
+  final _simulation = GravitySimulation();
+  final _windowMotion = WindowMotion();
+  final _repaint = ValueNotifier<int>(0);
+  late final Ticker _ticker;
+  StreamSubscription<dynamic>? _motionSubscription;
+  Duration? _lastTick;
   int _counter = 0;
 
+  bool get _supportsWindowMotion =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_tick)..start();
+    if (_supportsWindowMotion) {
+      _motionSubscription = _motionChannel.receiveBroadcastStream().listen(
+        (dynamic event) {
+          final sample = event as List<dynamic>;
+          final impulse = _windowMotion.sample(
+            Offset(
+              (sample[0] as num).toDouble(),
+              (sample[1] as num).toDouble(),
+            ),
+            (sample[2] as num).toDouble(),
+          );
+          _simulation.applyImpulse(impulse);
+        },
+        onError: (Object error) {
+          // Gravity and direct manipulation still work if the native stream fails.
+          debugPrint('Window motion unavailable: $error');
+        },
+      );
+    }
+  }
+
+  void _tick(Duration elapsed) {
+    final previous = _lastTick;
+    _lastTick = elapsed;
+    if (previous == null) return;
+    _simulation.advance((elapsed - previous).inMicroseconds / 1000000);
+    _repaint.value++;
+  }
+
+  @override
+  void dispose() {
+    _motionSubscription?.cancel();
+    _ticker.dispose();
+    _repaint.dispose();
+    super.dispose();
+  }
+
   void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+    setState(() => _counter++);
+  }
+
+  Widget _element(int index, Widget child) {
+    final body = _simulation.bodies[index];
+    return Positioned(
+      left: body.position.dx,
+      top: body.position.dy,
+      width: body.size.width,
+      height: body.size.height,
+      child: MouseRegion(
+        cursor: body.held
+            ? SystemMouseCursors.grabbing
+            : SystemMouseCursors.grab,
+        child: GestureDetector(
+          key: ValueKey('gravity-element-$index'),
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (_) {
+            body.held = true;
+            body.velocity = Offset.zero;
+          },
+          onPanUpdate: (details) {
+            body.position += details.delta;
+            _simulation.contain(body);
+            _repaint.value++;
+          },
+          onPanEnd: (details) {
+            body.held = false;
+            body.velocity = limitSpeed(details.velocity.pixelsPerSecond, 1800);
+          },
+          onPanCancel: () => body.held = false,
+          child: child,
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final colors = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
+        backgroundColor: colors.inversePrimary,
         title: Text(widget.title),
+        actions: [
+          IconButton(
+            tooltip: 'Drop elements again',
+            onPressed: () {
+              _simulation.reset();
+              _repaint.value++;
+            },
+            icon: const Icon(Icons.restart_alt),
+          ),
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: SafeArea(
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
           children: [
-            const Text('Brock has pushed the button this many times:',
-              style: TextStyle(
-              fontSize: 32.0, // Adjust this number to make it bigger
-              fontWeight: FontWeight.bold, // Optional: makes it bold too),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                _supportsWindowMotion
+                    ? 'Move the window to shake things up. Grab and toss any element.'
+                    : 'Gravity is on. Grab and toss any element.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: colors.onSurfaceVariant),
               ),
             ),
-            Text(
-              '$_counter',
-              style: TextStyle(
-                fontSize: 24.0, // Adjust this number to make it bigger
-                fontWeight: FontWeight.bold, // Optional: makes it bold too
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final bounds = constraints.biggest;
+                    if (bounds.isEmpty) return const SizedBox.shrink();
+                    final messageWidth = math.min(620.0, bounds.width);
+                    final painter = TextPainter(
+                      text: const TextSpan(
+                        text: _message,
+                        style: _messageStyle,
+                      ),
+                      textDirection: Directionality.of(context),
+                      textScaler: MediaQuery.textScalerOf(context),
+                    )..layout(maxWidth: math.max(1, messageWidth - 32));
+                    final messageHeight = math.min(
+                      bounds.height,
+                      painter.height + 32,
+                    );
+                    painter.dispose();
+                    _simulation.layout(bounds, [
+                      Size(messageWidth, messageHeight),
+                      Size(
+                        math.min(88, bounds.width),
+                        math.min(80, bounds.height),
+                      ),
+                      Size(
+                        math.min(56, bounds.width),
+                        math.min(56, bounds.height),
+                      ),
+                    ]);
+                    return ClipRect(
+                      child: AnimatedBuilder(
+                        animation: _repaint,
+                        builder: (context, _) => Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            _element(
+                              0,
+                              Material(
+                                color: colors.surfaceContainerLow,
+                                elevation: 2,
+                                borderRadius: BorderRadius.circular(18),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: SizedBox(
+                                      width: math.max(1, messageWidth - 32),
+                                      child: const Text(
+                                        _message,
+                                        textAlign: TextAlign.center,
+                                        style: _messageStyle,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            _element(
+                              1,
+                              Material(
+                                color: colors.primaryContainer,
+                                elevation: 3,
+                                borderRadius: BorderRadius.circular(20),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Center(
+                                    child: FittedBox(
+                                      fit: BoxFit.scaleDown,
+                                      child: Text(
+                                        '$_counter',
+                                        style: TextStyle(
+                                          fontSize: 32,
+                                          fontWeight: FontWeight.bold,
+                                          color: colors.onPrimaryContainer,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            _element(
+                              2,
+                              FloatingActionButton(
+                                onPressed: _incrementCounter,
+                                tooltip: 'Increment',
+                                child: const Icon(Icons.add),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }
